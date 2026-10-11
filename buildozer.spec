@@ -1,9 +1,9 @@
 [app]
-title = Chamoli News
+title = Sandesh
 package.name = dailynewsapp
 package.domain = org.sovereign
 source.dir = .
-source.include_exts = py,png,jpg,kv,atlas
+source.include_exts = py,png,jpg,kv,atlas,ttf
 version = 0.1
 requirements = python3,kivy==2.2.1,kivymd==1.1.1,pillow,requests,urllib3,idna,charset-normalizer,certifi
 orientation = portrait
