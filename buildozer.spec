@@ -1,5 +1,5 @@
 [app]
-title = Daily News App
+title = Chamoli News
 package.name = dailynewsapp
 package.domain = org.sovereign
 source.dir = .
