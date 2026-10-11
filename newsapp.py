@@ -143,16 +143,18 @@ class NewsApp(MDApp):
                 adaptive_height=True))
             return
         for dt, title, src, link in items[:40]:
-            card = MDCard(orientation="vertical", padding=dp(14),
-                          spacing=dp(6), size_hint_y=None,
-                          adaptive_height=True, radius=[dp(16)],
-                          elevation=1)
-            card.add_widget(MDLabel(
+            card = MDCard(orientation="vertical", size_hint_y=None,
+                          height=dp(90), radius=[dp(16)])
+            inner = MDBoxLayout(orientation="vertical", adaptive_height=True,
+                                padding=dp(14), spacing=dp(6))
+            inner.add_widget(MDLabel(
                 text=title.replace("[", "(").replace("]", ")"),
                 font_style="Subtitle1", adaptive_height=True))
-            card.add_widget(MDLabel(
+            inner.add_widget(MDLabel(
                 text="%s  •  %s" % (src, ago(dt)), font_style="Caption",
                 theme_text_color="Secondary", adaptive_height=True))
+            inner.bind(height=lambda i, h, c=card: setattr(c, "height", h))
+            card.add_widget(inner)
             card.bind(on_release=lambda x, u=link: webbrowser.open(u))
             self.feed.add_widget(card)
 
