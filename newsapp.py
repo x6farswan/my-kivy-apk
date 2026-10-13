@@ -263,15 +263,24 @@ def tex(text, fs, font="Roboto", bold=False, width=None, lines=0,
     if t is None:
         if len(_TC) > 160:
             _TC.clear()
-        kw = dict(text=text, font_size=sp(fs), font_name=font, bold=bold,
-                  halign=halign, valign="top")
-        if width:
-            kw["text_size"] = (width, None)
-        if lines:
-            kw["max_lines"] = lines
-        lb = CoreLabel(**kw)
-        lb.refresh()
-        t = lb.texture
+        try:
+            kw = dict(text=text, font_size=sp(fs), font_name=font, bold=bold,
+                      halign=halign, valign="top")
+            if width:
+                kw["text_size"] = (width, None)
+            if lines:
+                kw["max_lines"] = lines
+            lb = CoreLabel(**kw)
+            lb.refresh()
+            t = lb.texture
+        except Exception:
+            try:
+                kw["font_name"] = "Roboto"
+                lb = CoreLabel(**kw)
+                lb.refresh()
+                t = lb.texture
+            except Exception:
+                t = None
         _TC[key] = t
     return t
 
@@ -307,11 +316,7 @@ class Row(RecycleDataViewBehavior, Widget):
         self._press = False
         self.redraw()
 
-    def _move(self, *a):
-        if self._tr is not None:
-            self._tr.xy = self.pos
-
-    def redraw(self, *a):
+        def redraw(self, *a):
         self.canvas.clear()
         d = self.d
         if not d or self.width < dp(150):
@@ -319,8 +324,12 @@ class Row(RecycleDataViewBehavior, Widget):
         with self.canvas:
             PushMatrix()
             self._tr = Translate(self.x, self.y)
-            getattr(self, "k_" + d["kind"])(d, self.width, self.height)
+            try:
+                getattr(self, "k_" + d["kind"])(d, self.width, self.height)
+            except Exception:
+                pass
             PopMatrix()
+
 
     # --- drawing helpers (local coordinates) ---
     def put(self, t, x, ytop, col):
