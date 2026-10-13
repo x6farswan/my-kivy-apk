@@ -316,7 +316,7 @@ class Row(RecycleDataViewBehavior, Widget):
         self._press = False
         self.redraw()
 
-        def redraw(self, *a):
+    def redraw(self, *a):
         self.canvas.clear()
         d = self.d
         if not d or self.width < dp(150):
