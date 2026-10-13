@@ -4,6 +4,7 @@ import os
 import re
 import threading
 import time
+import traceback
 import webbrowser
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
@@ -14,17 +15,17 @@ import requests
 from kivy.animation import Animation
 from kivy.app import App
 from kivy.clock import Clock
-from kivy.core.image import Image as CoreImage
 from kivy.core.text import Label as CoreLabel
 from kivy.core.text import LabelBase
 from kivy.core.window import Window
 from kivy.graphics import (Color, Ellipse, PopMatrix, PushMatrix, Rectangle,
                            RoundedRectangle, Translate)
 from kivy.metrics import dp, sp
+from kivy.uix.anchorlayout import AnchorLayout
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
+from kivy.uix.modalview import ModalView
 from kivy.uix.recycleboxlayout import RecycleBoxLayout
 from kivy.uix.recycleview import RecycleView
 from kivy.uix.recycleview.views import RecycleDataViewBehavior
@@ -263,13 +264,13 @@ def tex(text, fs, font="Roboto", bold=False, width=None, lines=0,
     if t is None:
         if len(_TC) > 160:
             _TC.clear()
+        kw = dict(text=text, font_size=sp(fs), font_name=font, bold=bold,
+                  halign=halign, valign="top")
+        if width:
+            kw["text_size"] = (width, None)
+        if lines:
+            kw["max_lines"] = lines
         try:
-            kw = dict(text=text, font_size=sp(fs), font_name=font, bold=bold,
-                      halign=halign, valign="top")
-            if width:
-                kw["text_size"] = (width, None)
-            if lines:
-                kw["max_lines"] = lines
             lb = CoreLabel(**kw)
             lb.refresh()
             t = lb.texture
@@ -316,6 +317,10 @@ class Row(RecycleDataViewBehavior, Widget):
         self._press = False
         self.redraw()
 
+    def _move(self, *a):
+        if self._tr is not None:
+            self._tr.xy = self.pos
+
     def redraw(self, *a):
         self.canvas.clear()
         d = self.d
@@ -327,9 +332,8 @@ class Row(RecycleDataViewBehavior, Widget):
             try:
                 getattr(self, "k_" + d["kind"])(d, self.width, self.height)
             except Exception:
-                pass
+                traceback.print_exc()
             PopMatrix()
-
 
     # --- drawing helpers (local coordinates) ---
     def put(self, t, x, ytop, col):
@@ -598,879 +602,503 @@ class Pic(BoxLayout):
         super().__init__(size_hint=(None, None),
                          size=(dp(116), dp(116)), **kw)
         self.tex = None
+        with self.canvas.before:
+            Color(*P["gold"])
+            self._e = Ellipse(pos=self.pos, size=self.size)
+        self.bind(pos=self._u, size=self._u)
         self.letter = Label(text="U", font_size=sp(46), bold=True,
                             font_name=SERIF, color=P["onGold"])
         self.add_widget(self.letter)
-        self.bind(pos=self.redraw, size=self.redraw)
-
-    def set_photo(self, path, name):
-        self.tex = None
-        if path and os.path.exists(path):
-            try:
-                t = CoreImage(path).texture
-                s = min(t.width, t.height)
-                self.tex = t.get_region((t.width - s) // 2,
-                                        (t.height - s) // 2, s, s)
-            except Exception:
-                self.tex = None
-        txt = "" if self.tex else ((name or "U")[:1].upper())
-        self.letter.text = txt
-        self.letter.font_name = fnt(txt, SERIF)
-        self.redraw()
-
-    def redraw(self, *a):
-        self.canvas.before.clear()
-        with self.canvas.before:
-            Color(*P["gold"])
-            Ellipse(pos=self.pos, size=self.size)
-            if self.tex:
-                Color(1, 1, 1, 1)
-                Ellipse(pos=(self.x + dp(3), self.y + dp(3)),
-                        size=(self.width - dp(6), self.height - dp(6)),
-                        texture=self.tex)
-
-
-class Toast(Label):
-    def __init__(self, text, **kw):
-        super().__init__(text=text, font_size=sp(14), color=P["onGold"],
-                         size_hint=(None, None), **kw)
-        with self.canvas.before:
-            Color(*P["gold"])
-            self._r = RoundedRectangle(pos=self.pos, size=self.size,
-                                       radius=[dp(20)])
-        self.bind(pos=self._u, size=self._u, texture_size=self._fit)
-
-    def _fit(self, i, ts):
-        self.size = (ts[0] + dp(36), ts[1] + dp(18))
-        self.center_x = Window.width / 2
 
     def _u(self, *a):
-        self._r.pos = self.pos
-        self._r.size = self.size
+        self._e.pos = self.pos
+        self._e.size = self.size
 
-
-class Dim(Widget):
-    def __init__(self, cb, **kw):
-        super().__init__(**kw)
-        self.cb = cb
-        with self.canvas:
-            self.col = Color(0, 0, 0, 0)
-            self.rect = Rectangle(pos=self.pos, size=self.size)
-        self.bind(pos=self._u, size=self._u)
-
-    def _u(self, *a):
-        self.rect.pos = self.pos
-        self.rect.size = self.size
-
-    def on_touch_down(self, touch):
-        self.cb()
-        return True
-
-    def on_touch_move(self, touch):
-        return True
-
-    def on_touch_up(self, touch):
-        return True
-
-
-class Sheet(FloatLayout):
-    """iOS style bottom action sheet."""
-
-    def __init__(self, app, title, opts, **kw):
-        super().__init__(**kw)
-        self.app = app
-        self.closing = False
-        self.dim = Dim(self.dismiss)
-        self.add_widget(self.dim)
-        n = len(opts)
-        ph = dp(34) + dp(56) + n * dp(54)
-        self.panel = Panel(orientation="vertical", size_hint=(1, None),
-                           height=ph, bg="card", radius=24,
-                           padding=[dp(10), dp(16), dp(10), dp(18)],
-                           spacing=dp(2))
-        self.panel.add_widget(Txt(title, fs=13, color="sub",
-                                  max_lines=2, size_hint_y=None))
-        for icon, label, cb in opts:
-            r = Card(orientation="horizontal", size_hint_y=None,
-                     height=dp(52), padding=[dp(12), 0, dp(12), 0],
-                     spacing=dp(14), radius=14)
-            r.add_widget(Glyph(icon))
-            r.add_widget(Txt(label, fs=15, fill=True))
-            r.bind(on_release=lambda x, f=cb: self.pick(f))
-            self.panel.add_widget(r)
-        self.add_widget(self.panel)
-
-    def show(self):
-        self.app.sheet = self
-        Window.add_widget(self)
-        self.panel.y = -self.panel.height
-        Animation(y=0, d=.26, t="out_cubic").start(self.panel)
-        Animation(a=.6, d=.26).start(self.dim.col)
-
-    def pick(self, cb):
-        self.dismiss()
-        Clock.schedule_once(lambda dt: cb(), .06)
-
-    def dismiss(self):
-        if self.closing:
-            return
-        self.closing = True
-        a = Animation(y=-self.panel.height, d=.2, t="in_cubic")
-        a.bind(on_complete=lambda *x: self._gone())
-        a.start(self.panel)
-        Animation(a=0, d=.2).start(self.dim.col)
-
-    def _gone(self):
-        try:
-            Window.remove_widget(self)
-        except Exception:
-            pass
-        if self.app.sheet is self:
-            self.app.sheet = None
+    def set_name(self, n):
+        n = (n or "").strip()
+        self.letter.text = n[:1].upper() if n else "U"
+        self.letter.font_name = fnt(self.letter.text, SERIF)
 
 
 # ---------------- app ----------------
-class SandeshApp(App):
-    def build(self):
-        self.title = "Sandesh"
-        Window.softinput_mode = "below_target"
-        self.prof = self.load_json("profile.json", {})
-        if not isinstance(self.prof, dict):
-            self.prof = {}
-        self.prof.setdefault("name", "user1")
-        self.prof.setdefault("dark", True)
-        self.prof.setdefault("lang", "both")
-        self.prof.setdefault("photo", "")
-        self.prof.setdefault("hidden", [])
-        self.saved = self.load_json("saved.json", [])
-        self.cache = self.load_json("cache.json", {})
-        if not isinstance(self.cache, dict):
-            self.cache = {}
-        self.wx_vals = tuple(self.cache.get("wx", ["--°", "Loading", ""]))
-        self.cat = CATS[0]
-        self.cat_items = []
-        self.cat_msg = "Pick a category above."
-        self.cat_loaded = False
-        self.live_text = "UPDATED --:--   ·   AUTO REFRESH"
-        self.live_links = []
-        self.last = 0
-        self.cur = "home"
-        self.prev = "home"
-        self.cur_item = None
-        self.sheet = None
-        self.live_dot = None
-        self.apply_palette()
-        Window.bind(on_keyboard=self.on_key)
-        return self.make_root()
+class NewsApp(App):
+    title = "Sandesh"
 
-    def on_start(self):
-        self.load_home()
-        self.load_live()
-        Clock.schedule_interval(lambda dt: self.load_live(), 120)
+    # ----- state -----
+    def state_path(self):
+        return os.path.join(self.user_data_dir, "state.json")
 
-    def on_pause(self):
-        return True
-
-    def on_resume(self):
-        if time.time() - self.last > 300:
-            self.load_home()
-            self.load_live()
-
-    def on_key(self, win, key, *a):
-        if key != 27:
-            return False
-        if self.sheet is not None:
-            self.sheet.dismiss()
-            return True
-        if self.cur == "detail":
-            self.close_detail()
-            return True
-        if self.cur != "home":
-            self.goto("home")
-            return True
-        return False
-
-    # ----- storage -----
-    def load_json(self, name, default):
+    def load_state(self):
+        self.dark = True
+        self.name = ""
+        self.lang = "both"
+        self.saved = []
         try:
-            p = os.path.join(self.user_data_dir, name)
-            with open(p, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return default
-
-    def save_json(self, name, obj):
-        try:
-            p = os.path.join(self.user_data_dir, name)
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(obj, f)
+            with open(self.state_path(), "r", encoding="utf-8") as f:
+                s = json.load(f)
+            self.dark = s.get("dark", True)
+            self.name = s.get("name", "")
+            self.lang = s.get("lang", "both")
+            self.saved = s.get("saved", [])
         except Exception:
             pass
 
-    def save_prof(self):
-        self.save_json("profile.json", self.prof)
+    def save_state(self):
+        try:
+            with open(self.state_path(), "w", encoding="utf-8") as f:
+                json.dump({"dark": self.dark, "name": self.name,
+                           "lang": self.lang, "saved": self.saved}, f,
+                          ensure_ascii=False)
+        except Exception:
+            traceback.print_exc()
 
-    # ----- theme -----
-    def apply_palette(self):
+    # ----- build -----
+    def build(self):
+        self.load_state()
         P.clear()
-        P.update(DARK if self.prof.get("dark", True) else LIGHT)
-        Window.clearcolor = P["bg"]
-
-    def toggle_theme(self):
-        self.prof["dark"] = not self.prof.get("dark", True)
-        self.save_prof()
-        self.apply_palette()
-        if self.sheet is not None:
-            self.sheet.dismiss()
-        if self.cur == "detail":
-            self.cur = self.prev
-        Window.remove_widget(self.root)
-        self.root = self.make_root()
-        Window.add_widget(self.root)
-
-    def toast(self, msg):
-        t = Toast(msg)
-        t.opacity = 0
-        t.y = dp(90)
-        Window.add_widget(t)
-        a = (Animation(opacity=1, d=.15) + Animation(opacity=1, d=1.2)
-             + Animation(opacity=0, d=.3))
-        a.bind(on_complete=lambda *x: Window.remove_widget(t))
-        a.start(t)
-
-    # ----- structure -----
-    def make_root(self):
-        root = BoxLayout(orientation="vertical")
-        self.sm = ScreenManager(transition=FadeTransition(duration=.16))
-        for s in (self.build_home(), self.build_explore(),
-                  self.build_live(), self.build_saved(),
-                  self.build_profile(), self.build_detail()):
-            self.sm.add_widget(s)
-        root.add_widget(self.sm)
-        root.add_widget(self.make_nav())
-        self.sm.current = self.cur
-        self.nav[self.cur].active(True)
-        self.render_home()
-        self.render_cat()
-        self.render_live()
-        self.render_saved()
-        self.paint_pills()
+        P.update(DARK if self.dark else LIGHT)
+        self.data = {}
+        self.rvs = {}
+        self.navs = {}
+        self.pills = {}
+        self.lpills = {}
+        self.cat = CATS[0]
+        self.prev = "home"
+        self.cur = None
+        self.home_args = (None, None, None)
+        root = self.make_ui()
+        Window.bind(on_keyboard=self.on_key)
+        Clock.schedule_once(lambda dt: self.refresh_all(), .3)
+        Clock.schedule_interval(lambda dt: self.load_live(), 120)
         return root
 
-    def make_nav(self):
-        bar = BoxLayout(size_hint_y=None, height=dp(64))
-        with bar.canvas.before:
-            Color(*P["card"])
-            rect = Rectangle(pos=bar.pos, size=bar.size)
-            Color(*P["line"])
-            ln = Rectangle(pos=(bar.x, bar.top - 1), size=(bar.width, 1))
+    def make_ui(self):
+        Window.clearcolor = P["bg"]
+        root = BoxLayout(orientation="vertical")
 
-        def upd(*a):
-            rect.pos = bar.pos
-            rect.size = bar.size
-            ln.pos = (bar.x, bar.top - 1)
-            ln.size = (bar.width, 1)
-        bar.bind(pos=upd, size=upd)
-        self.nav = {}
-        for key, icon, label in TABS:
-            it = NavItem(icon, label)
-            it.bind(on_release=lambda x, k=key: self.goto(k))
-            self.nav[key] = it
-            bar.add_widget(it)
-        return bar
+        hdr = BoxLayout(size_hint_y=None, height=dp(60),
+                        padding=[dp(20), dp(8), dp(12), dp(8)],
+                        spacing=dp(4))
+        hdr.add_widget(Txt("Sandesh", 28, "gold", serif=True, fill=True))
+        b1 = IconBtn("refresh", 24, "text", 44)
+        b1.bind(on_release=lambda *a: self.refresh_all())
+        b2 = IconBtn("weather-night" if self.dark else "white-balance-sunny",
+                     24, "text", 44)
+        b2.bind(on_release=lambda *a: self.toggle_theme())
+        hdr.add_widget(b1)
+        hdr.add_widget(b2)
 
-    def goto(self, key, fade=True):
-        self.cur = key
-        for k, it in self.nav.items():
-            it.active(k == key)
-        if fade:
-            self.sm.transition = FadeTransition(duration=.16)
-        self.sm.current = key
-        self.pulse(key == "live")
-        if key == "explore" and not self.cat_loaded:
-            self.cat_loaded = True
-            self.load_cat()
-
-    def pulse(self, on):
-        d = self.live_dot
-        if d is None:
-            return
-        Animation.cancel_all(d)
-        d.opacity = 1
-        if on:
-            a = Animation(opacity=.25, d=.9) + Animation(opacity=1, d=.9)
-            a.repeat = True
-            a.start(d)
-
-    def header(self, title, actions=(), live=False):
-        h = BoxLayout(size_hint_y=None, height=dp(64),
-                      padding=[dp(20), 0, dp(10), 0])
-        if live:
-            dot = Label(text=ic("circle"), font_name="MDI",
-                        font_size=sp(12), color=(.92, .25, .25, 1),
-                        size_hint=(None, None), size=(dp(22), dp(22)),
-                        pos_hint={"center_y": .5})
-            self.live_dot = dot
-            h.add_widget(dot)
-        h.add_widget(Txt(title, fs=26, color="gold", serif=True,
-                         wrap=False, fill=True))
-        for icon, cb in actions:
-            b = IconBtn(icon, fs=22, color="text", box=44,
-                        pos_hint={"center_y": .5})
-            b.bind(on_release=lambda x, f=cb: f())
-            h.add_widget(b)
-        return h
-
-    def scroll(self):
-        sv = ScrollView(bar_width=0, do_scroll_x=False,
-                        scroll_distance=dp(6), scroll_timeout=40)
-        box = BoxLayout(orientation="vertical", size_hint_y=None,
-                        spacing=dp(12),
-                        padding=[dp(16), dp(4), dp(16), dp(18)])
-        box.bind(minimum_height=box.setter("height"))
-        sv.add_widget(box)
-        return sv, box
-
-    def langs(self):
-        if not HINDI:
-            return ["en"]
-        return {"en": ["en"], "hi": ["hi"]}.get(
-            self.prof.get("lang", "both"), ["en", "hi"])
-
-    def visible(self, items):
-        hid = set(self.prof.get("hidden", []))
-        return [x for x in items if x.get("src") not in hid]
-
-    # ----- screens -----
-    def build_home(self):
-        s = Screen(name="home")
-        col = BoxLayout(orientation="vertical")
-        col.add_widget(self.header("Sandesh", [
-            ("refresh", self.load_home),
-            ("theme-light-dark", self.toggle_theme)]))
-        self.home_rv = make_rv()
-        col.add_widget(self.home_rv)
-        s.add_widget(col)
-        return s
-
-    def build_explore(self):
-        s = Screen(name="explore")
-        col = BoxLayout(orientation="vertical")
-        col.add_widget(self.header("Explore", [
-            ("refresh", self.load_cat),
-            ("theme-light-dark", self.toggle_theme)]))
-        psv = ScrollView(size_hint_y=None, height=dp(52), bar_width=0,
-                         do_scroll_y=False)
-        prow = BoxLayout(size_hint_x=None, spacing=dp(8),
-                         padding=[dp(16), dp(6)])
-        prow.bind(minimum_width=prow.setter("width"))
+        sm = ScreenManager(transition=FadeTransition(duration=.12))
+        self.sm = sm
+        self.rvs = {}
         self.pills = {}
-        for n in CATS:
-            p = Pill(n)
-            p.bind(on_release=lambda x, nm=n: self.pick_cat(nm))
-            self.pills[n] = p
-            prow.add_widget(p)
-        psv.add_widget(prow)
-        col.add_widget(psv)
-        self.cat_rv = make_rv()
-        col.add_widget(self.cat_rv)
-        s.add_widget(col)
-        return s
+        self.lpills = {}
 
-    def build_live(self):
-        s = Screen(name="live")
-        col = BoxLayout(orientation="vertical")
-        col.add_widget(self.header("Live", [
-            ("refresh", self.load_live),
-            ("theme-light-dark", self.toggle_theme)], live=True))
-        self.live_rv = make_rv()
-        col.add_widget(self.live_rv)
-        s.add_widget(col)
-        return s
+        for key in ("home", "live", "saved"):
+            s = Screen(name=key)
+            rv = make_rv()
+            self.rvs[key] = rv
+            s.add_widget(rv)
+            sm.add_widget(s)
 
-    def build_saved(self):
-        s = Screen(name="saved")
-        col = BoxLayout(orientation="vertical")
-        col.add_widget(self.header("Saved", [
-            ("theme-light-dark", self.toggle_theme)]))
-        self.saved_rv = make_rv()
-        col.add_widget(self.saved_rv)
-        s.add_widget(col)
-        return s
+        # explore (pills + list)
+        s = Screen(name="explore")
+        box = BoxLayout(orientation="vertical")
+        sv = ScrollView(size_hint_y=None, height=dp(50), do_scroll_y=False,
+                        bar_width=0)
+        inner = BoxLayout(size_hint_x=None, spacing=dp(8),
+                          padding=[dp(16), dp(6), dp(16), dp(6)])
+        inner.bind(minimum_width=inner.setter("width"))
+        for c in CATS:
+            p = Pill(c)
+            p.bind(on_release=lambda i, c=c: self.pick(c))
+            self.pills[c] = p
+            inner.add_widget(p)
+        sv.add_widget(inner)
+        box.add_widget(sv)
+        rv = make_rv()
+        self.rvs["explore"] = rv
+        box.add_widget(rv)
+        s.add_widget(box)
+        sm.add_widget(s)
+        self.mark_pills()
 
-    def build_detail(self):
-        s = Screen(name="detail")
-        self.detail_col = BoxLayout(orientation="vertical")
-        s.add_widget(self.detail_col)
-        self.d_star = None
-        self.d_status = None
-        return s
+        sm.add_widget(self.make_me())
+        sm.add_widget(self.make_detail_screen())
 
-    def build_profile(self):
+        nav = Panel(bg="card", radius=0, size_hint_y=None, height=dp(64))
+        self.navs = {}
+        for key, icon, label in TABS:
+            n = NavItem(icon, label)
+            n.bind(on_release=lambda i, k=key: self.go(k))
+            self.navs[key] = n
+            nav.add_widget(n)
+
+        root.add_widget(hdr)
+        root.add_widget(sm)
+        root.add_widget(nav)
+
+        loading = [row({"kind": "note", "icon": "timer-sand",
+                        "a": "Loading..."}, dp(190))]
+        for k, rv in self.rvs.items():
+            rows = self.data.get(k)
+            if rows is None:
+                rows = (news_rows(self.saved, "Koi saved khabar nahi.\n"
+                                  "Star dabake save karo", "star-outline")
+                        if k == "saved" else loading)
+                self.data[k] = rows
+            rv.data = rows
+        self.navs["home"].active(True)
+        return root
+
+    def make_me(self):
         s = Screen(name="me")
-        col = BoxLayout(orientation="vertical")
-        col.add_widget(self.header("Profile", [
-            ("theme-light-dark", self.toggle_theme)]))
-        sv, box = self.scroll()
-        name = self.prof["name"]
-        self.avatar = Pic(pos_hint={"center_x": .5})
-        self.avatar.set_photo(self.prof.get("photo"), name)
-        box.add_widget(self.avatar)
-        self.name_lbl = Txt(name, fs=24, serif=True, halign="center")
-        box.add_widget(self.name_lbl)
-        cp = Card(size_hint=(None, None), size=(dp(170), dp(40)),
-                  pos_hint={"center_x": .5}, radius=20)
-        cp.add_widget(Txt("Change photo", fs=14, color="gold", bold=True,
-                          fill=True, halign="center"))
-        cp.bind(on_release=lambda x: self.pick_photo())
-        box.add_widget(cp)
-        self.name_in = Field(text=name, hint_text="Your name")
-        box.add_widget(self.name_in)
-        box.add_widget(self.gold_btn("Save name", self.save_name))
-        box.add_widget(Txt("PREFERENCES", fs=12, color="gold", bold=True))
-        box.add_widget(self.row_btn(
-            "Appearance", "Dark" if self.prof["dark"] else "Light",
-            lambda v: self.toggle_theme()))
-        box.add_widget(self.row_btn("Language", self.lang_label(),
-                                    self.cycle_lang))
-        box.add_widget(self.row_btn(
-            "Hidden sources", str(len(self.prof.get("hidden", []))),
-            self.clear_hidden))
-        box.add_widget(self.row_btn("Version", "Sandesh 4.0",
-                                    lambda v: None))
-        col.add_widget(sv)
-        cred = BoxLayout(orientation="vertical", size_hint_y=None,
-                         height=dp(96), padding=[0, dp(4)])
-        cred.add_widget(Txt(
-            "Made in Gopeshwar with [color=ff4d6d][font=MDI]%s[/font]"
-            "[/color]" % ic("heart"), fs=12, color="sub",
-            halign="center", markup=True))
-        l1 = LinkLabel(
-            text="by Rohit  ·  [color=%s]@x6_farswan[/color]" % hexc("gold"),
-            markup=True, font_size=sp(12), color=P["sub"],
-            size_hint_y=None, height=dp(28))
-        l1.bind(on_release=lambda x: open_url(INSTA))
-        cred.add_widget(l1)
-        l2 = LinkLabel(
-            text="[color=%s]x6farswan.github.io[/color]" % hexc("gold"),
-            markup=True, font_size=sp(12), color=P["sub"],
-            size_hint_y=None, height=dp(28))
-        l2.bind(on_release=lambda x: open_url(SITE))
-        cred.add_widget(l2)
-        col.add_widget(cred)
-        s.add_widget(col)
+        sv = ScrollView(bar_width=0, do_scroll_x=False)
+        box = BoxLayout(orientation="vertical", size_hint_y=None,
+                        spacing=dp(12), padding=[dp(16), dp(10), dp(16),
+                                                 dp(24)])
+        box.bind(minimum_height=box.setter("height"))
+
+        anc = AnchorLayout(size_hint_y=None, height=dp(130))
+        self.pic = Pic()
+        self.pic.set_name(self.name)
+        anc.add_widget(self.pic)
+        box.add_widget(anc)
+
+        self.nf = Field(text=self.name, hint_text="Your name")
+        self.nf.bind(on_text_validate=self.set_name)
+        box.add_widget(self.nf)
+
+        box.add_widget(Txt("NEWS LANGUAGE", 12, "gold", bold=True))
+        lrow = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+        for code, label in (("en", "English"), ("hi", "Hindi"),
+                            ("both", "Both")):
+            p = Pill(label)
+            p.bind(on_release=lambda i, c=code: self.set_lang(c))
+            self.lpills[code] = p
+            lrow.add_widget(p)
+        lrow.add_widget(Widget())
+        box.add_widget(lrow)
+        self.mark_lang()
+
+        for label, url in (("Website  -  x6farswan.github.io", SITE),
+                           ("Instagram  -  @x6_farswan", INSTA)):
+            c = Card(bg="card", size_hint_y=None, height=dp(52),
+                     padding=[dp(16), 0])
+            c.add_widget(Txt(label, 14, fill=True))
+            c.bind(on_release=lambda i, u=url: open_url(u))
+            box.add_widget(c)
+
+        c = Card(bg="card", size_hint_y=None, height=dp(52),
+                 padding=[dp(16), 0])
+        c.add_widget(Txt("Clear saved news", 14, "sub", fill=True))
+        c.bind(on_release=lambda *a: self.clear_saved())
+        box.add_widget(c)
+
+        sv.add_widget(box)
+        s.add_widget(sv)
         return s
 
-    # ----- small builders -----
-    def gold_btn(self, text, cb):
-        b = Card(bg="gold", size_hint_y=None, height=dp(48), radius=24)
-        b.add_widget(Txt(text, fs=15, color="onGold", bold=True,
-                         fill=True, halign="center"))
-        b.bind(on_release=lambda x: cb())
-        return b
+    def make_detail_screen(self):
+        s = Screen(name="detail")
+        box = BoxLayout(orientation="vertical")
+        top = BoxLayout(size_hint_y=None, height=dp(48),
+                        padding=[dp(8), 0, dp(8), 0])
+        back = IconBtn("arrow-left", 24, "text", 44)
+        back.bind(on_release=lambda *a: self.back())
+        self.dstar = IconBtn("star-outline", 24, "sub", 44)
+        self.dstar.bind(on_release=lambda *a: self.detail_star())
+        top.add_widget(back)
+        top.add_widget(Widget())
+        top.add_widget(self.dstar)
+        box.add_widget(top)
+        sv = ScrollView(bar_width=0, do_scroll_x=False)
+        self.dbox = BoxLayout(orientation="vertical", size_hint_y=None,
+                              spacing=dp(12),
+                              padding=[dp(16), dp(8), dp(16), dp(24)])
+        self.dbox.bind(minimum_height=self.dbox.setter("height"))
+        sv.add_widget(self.dbox)
+        box.add_widget(sv)
+        s.add_widget(box)
+        return s
 
-    def row_btn(self, title, value, cb):
-        r = Card(orientation="horizontal", size_hint_y=None,
-                 height=dp(54), padding=[dp(18), 0, dp(18), 0], radius=14)
-        r.add_widget(Txt(title, fs=15, fill=True))
-        v = Txt(value, fs=15, color="gold", fill=True, halign="right")
-        r.add_widget(v)
-        r.bind(on_release=lambda x: cb(v))
-        return r
+    # ----- navigation -----
+    def go(self, key):
+        self.sm.transition = FadeTransition(duration=.12)
+        self.sm.current = key
+        for k, n in self.navs.items():
+            n.active(k == key)
 
-    def lang_label(self):
-        if not HINDI:
-            return "English only"
-        return {"en": "English", "hi": "हिंदी"}.get(
-            self.prof.get("lang", "both"), "English + हिंदी")
+    def on_key(self, window, key, *a):
+        if key == 27:
+            if self.sm.current == "detail":
+                self.back()
+                return True
+            if self.sm.current != "home":
+                self.go("home")
+                return True
+        return False
 
-    def cycle_lang(self, v):
-        order = ["both", "en", "hi"]
-        cur = self.prof.get("lang", "both")
-        nxt = order[(order.index(cur) + 1) % 3] if cur in order else "both"
-        self.prof["lang"] = nxt
-        self.save_prof()
-        v.text = self.lang_label()
-        v.font_name = fnt(v.text)
+    def back(self):
+        if self.sm.current == "detail":
+            self.sm.transition = SlideTransition(direction="right",
+                                                 duration=.18)
+            self.sm.current = self.prev
+
+    # ----- theme / settings -----
+    def toggle_theme(self):
+        self.dark = not self.dark
+        P.clear()
+        P.update(DARK if self.dark else LIGHT)
+        self.save_state()
+        cur = self.prev if self.sm.current == "detail" else self.sm.current
+        old = self.root
+        self.root = self.make_ui()
+        Window.remove_widget(old)
+        Window.add_widget(self.root)
+        self.go(cur)
+
+    def set_name(self, *a):
+        self.name = self.nf.text.strip()
+        self.pic.set_name(self.name)
+        self.save_state()
+        self.set_home(*self.home_args)
+
+    def set_lang(self, code):
+        self.lang = code
+        self.save_state()
+        self.mark_lang()
+        self.refresh_all()
+
+    def mark_lang(self):
+        for c, p in self.lpills.items():
+            p.set_on(c == self.lang)
+
+    def mark_pills(self):
+        for c, p in self.pills.items():
+            p.set_on(c == self.cat)
+
+    def pick(self, c):
+        self.cat = c
+        self.mark_pills()
+        self.load_explore()
+
+    # ----- data -----
+    def qs(self, en, hi):
+        if self.lang == "en":
+            return [(en, "en")]
+        if self.lang == "hi":
+            return [(hi, "hi")]
+        return [(en, "en"), (hi, "hi")]
+
+    def set_rows(self, key, rows):
+        self.data[key] = rows
+        rv = self.rvs.get(key)
+        if rv is not None:
+            rv.data = rows
+            rv.refresh_from_data()
+
+    def loading(self, key):
+        self.set_rows(key, [row({"kind": "note", "icon": "timer-sand",
+                                 "a": "Loading..."}, dp(190))])
+
+    def refresh_all(self):
         self.load_home()
+        self.load_explore()
         self.load_live()
-        self.cat_loaded = False
-        if self.cur == "explore":
-            self.goto("explore")
 
-    def clear_hidden(self, v):
-        self.prof["hidden"] = []
-        self.save_prof()
-        v.text = "0"
-        self.render_feeds()
-        self.toast("Showing all sources")
+    def get_wx(self):
+        try:
+            u = ("https://api.open-meteo.com/v1/forecast?latitude=%s"
+                 "&longitude=%s&current=temperature_2m,weather_code"
+                 % WX)
+            c = get(u).json()["current"]
+            return ("%d\u00b0" % round(c["temperature_2m"]),
+                    wx_text(int(c["weather_code"])))
+        except Exception:
+            return None
 
-    def save_name(self):
-        n = self.name_in.text.strip() or "user1"
-        self.prof["name"] = n
-        self.save_prof()
-        self.name_lbl.text = n
-        self.name_lbl.font_name = fnt(n, SERIF)
-        self.avatar.set_photo(self.prof.get("photo"), n)
-        self.render_home()
-        self.toast("Saved")
+    def load_home(self):
+        def work():
+            try:
+                local = gather(self.qs(CH_Q["en"], CH_Q["hi"]))
+            except Exception:
+                local = None
+            try:
+                uk = gather(self.qs("Uttarakhand", "उत्तराखंड"))
+            except Exception:
+                uk = None
+            wx = self.get_wx()
+            Clock.schedule_once(lambda dt: self.set_home(local, uk, wx))
+        threading.Thread(target=work, daemon=True).start()
 
-    # ----- story page -----
-    def is_saved(self, it):
-        return any(s["link"] == it["link"] for s in self.saved)
-
-    def open_detail(self, it):
-        self.cur_item = it
-        self.pulse(False)
-        if self.cur != "detail":
-            self.prev = self.cur
-        self.cur = "detail"
-        col = self.detail_col
-        col.clear_widgets()
-        on = self.is_saved(it)
-        h = BoxLayout(size_hint_y=None, height=dp(64),
-                      padding=[dp(8), 0, dp(8), 0])
-        back = IconBtn("arrow-left", fs=24, color="text", box=48,
-                       pos_hint={"center_y": .5})
-        back.bind(on_release=lambda x: self.close_detail())
-        h.add_widget(back)
-        h.add_widget(Txt("Story", fs=22, color="gold", serif=True,
-                         wrap=False, fill=True))
-        self.d_star = IconBtn("star" if on else "star-outline", fs=24,
-                              color="gold" if on else "text", box=48,
-                              pos_hint={"center_y": .5})
-        self.d_star.bind(on_release=lambda x: self.toggle_save(
-            self.cur_item))
-        h.add_widget(self.d_star)
-        dots = IconBtn("dots-vertical", fs=24, color="text", box=48,
-                       pos_hint={"center_y": .5})
-        dots.bind(on_release=lambda x: self.open_menu(self.cur_item))
-        h.add_widget(dots)
-        col.add_widget(h)
-        sv, box = self.scroll()
-        box.spacing = dp(14)
-        box.add_widget(Txt((it.get("src") or "News").upper(), fs=12,
-                           color="gold", bold=True))
-        box.add_widget(Txt(it["title"], fs=24, serif=True))
-        when = time.strftime("%d %b %Y, %H:%M", time.localtime(it["ts"]))
-        box.add_widget(Txt("%s   ·   %s" % (ago(it["ts"]), when), fs=12,
-                           color="sub"))
-        self.d_status = Txt("", fs=12, color="sub")
-        box.add_widget(self.d_status)
-        self.sync_detail()
-        box.add_widget(self.gold_btn(
-            "Open in browser", lambda: open_url(self.cur_item["link"])))
-        rel = it.get("rel") or []
-        if rel:
-            box.add_widget(Txt("ALSO REPORTED BY  (%d)" % len(rel), fs=12,
-                               color="gold", bold=True))
-            for r in rel:
-                c = Card(orientation="vertical", size_hint_y=None,
-                         padding=[dp(16), dp(12), dp(16), dp(12)],
-                         spacing=dp(4), radius=14)
-                c.bind(minimum_height=c.setter("height"))
-                c.add_widget(Txt(r["title"], fs=15, serif=True))
-                c.add_widget(Txt(r["src"], fs=12, color="gold", bold=True))
-                c.bind(on_release=lambda x, u=r["link"]: open_url(u))
-                box.add_widget(c)
+    def set_home(self, local, uk, wx):
+        self.home_args = (local, uk, wx)
+        h = time.localtime().tm_hour
+        g = ("Good morning" if h < 12 else
+             "Good afternoon" if h < 17 else "Good evening")
+        if self.name:
+            g += ", " + self.name
+        rows = [row({"kind": "greet", "a": g,
+                     "b": time.strftime("%A, %d %B")}, dp(64))]
+        if wx:
+            rows.append(row({"kind": "hero", "t": wx[0], "c": wx[1],
+                             "m": "Gopeshwar, Uttarakhand"}, dp(110)))
+        if local is None and uk is None:
+            rows.append(row({"kind": "note", "icon": "wifi-off",
+                             "a": "Internet nahi mil raha.\n"
+                                  "Refresh dabake dobara try karo"},
+                            dp(190)))
         else:
-            box.add_widget(Txt(
-                "No other sources are grouped with this story right now.",
-                fs=13, color="sub"))
-        col.add_widget(sv)
-        self.sm.transition = SlideTransition(direction="left", duration=.2)
+            rows.append(row({"kind": "section", "a": "CHAMOLI"}, dp(26)))
+            rows += news_rows(local, "Chamoli ki koi taaza khabar nahi",
+                              "map-marker-off")
+            rows.append(row({"kind": "section", "a": "UTTARAKHAND"},
+                            dp(26)))
+            rows += news_rows(uk, "Koi taaza khabar nahi")
+        self.set_rows("home", rows)
+
+    def load_explore(self):
+        cat = self.cat
+        self.loading("explore")
+
+        def work():
+            try:
+                items = gather(self.qs(CAT_Q["en"][cat], CAT_Q["hi"][cat]))
+                msg = "Is category me koi taaza khabar nahi"
+            except Exception:
+                items = []
+                msg = "Internet nahi mil raha"
+
+            def done(dt):
+                if cat == self.cat:
+                    self.set_rows("explore", news_rows(items, msg))
+            Clock.schedule_once(done)
+        threading.Thread(target=work, daemon=True).start()
+
+    def load_live(self):
+        def work():
+            try:
+                items = fresh(gather([("breaking news India", "en"),
+                                      ("ताज़ा खबर", "hi")]))
+                msg = "Abhi koi live khabar nahi"
+            except Exception:
+                items = []
+                msg = "Internet nahi mil raha"
+            rows = [row({"kind": "section", "a": "LAST 24 HOURS"}, dp(26))]
+            rows += news_rows(items, msg, "access-point-off")
+            Clock.schedule_once(lambda dt: self.set_rows("live", rows))
+        threading.Thread(target=work, daemon=True).start()
+
+    # ----- saved -----
+    def is_saved(self, d):
+        link = d.get("link")
+        return any(x.get("link") == link for x in self.saved)
+
+    def toggle_save(self, d):
+        link = d.get("link")
+        if self.is_saved(d):
+            self.saved = [x for x in self.saved if x.get("link") != link]
+        else:
+            item = {k: v for k, v in d.items() if k != "kind"}
+            self.saved.insert(0, item)
+        self.save_state()
+        self.update_saved()
+        if self.cur is not None and self.cur.get("link") == link:
+            self.paint_dstar()
+
+    def update_saved(self):
+        self.set_rows("saved", news_rows(
+            self.saved, "Koi saved khabar nahi.\nStar dabake save karo",
+            "star-outline"))
+
+    def clear_saved(self):
+        self.saved = []
+        self.save_state()
+        self.update_saved()
+        for rv in self.rvs.values():
+            rv.refresh_from_data()
+
+    # ----- detail / menu -----
+    def paint_dstar(self):
+        s = self.cur is not None and self.is_saved(self.cur)
+        self.dstar.set("star" if s else "star-outline",
+                       "gold" if s else "sub")
+
+    def detail_star(self):
+        if self.cur is not None:
+            self.toggle_save(self.cur)
+            for rv in self.rvs.values():
+                rv.refresh_from_data()
+
+    def open_detail(self, d):
+        self.cur = d
+        if self.sm.current != "detail":
+            self.prev = self.sm.current
+        box = self.dbox
+        box.clear_widgets()
+        box.add_widget(Txt(d["title"], 22, serif=True))
+        meta = (d.get("src") or "") + "  -  " + ago(d["ts"])
+        box.add_widget(Txt(meta, 13, "gold", bold=True))
+        b = Card(bg="gold", size_hint_y=None, height=dp(52))
+        b.add_widget(Txt("Open full story", 15, "onGold", bold=True,
+                         halign="center", fill=True))
+        b.bind(on_release=lambda *a: open_url(d["link"]))
+        box.add_widget(b)
+        rel = d.get("rel") or []
+        if rel:
+            box.add_widget(Txt("RELATED COVERAGE", 12, "gold", bold=True))
+        for r in rel:
+            c = Card(bg="card", orientation="vertical", size_hint_y=None,
+                     height=dp(96), padding=dp(14), spacing=dp(2))
+            c.add_widget(Txt(r["title"], 15, serif=True, fill=True,
+                             max_lines=3))
+            c.add_widget(Txt(r.get("src") or "", 11, "gold", bold=True))
+            c.bind(on_release=lambda i, u=r["link"]: open_url(u))
+            box.add_widget(c)
+        self.paint_dstar()
+        self.sm.transition = SlideTransition(direction="left", duration=.18)
         self.sm.current = "detail"
 
-    def sync_detail(self):
-        if self.cur != "detail" or self.cur_item is None:
-            return
-        on = self.is_saved(self.cur_item)
-        if self.d_star is not None:
-            self.d_star.set("star" if on else "star-outline",
-                            "gold" if on else "text")
-        if self.d_status is not None:
-            self.d_status.text = (
-                "Saved on this phone with full details" if on else
-                "Temporary: details clear when the feed refreshes. "
-                "Tap the star to keep it.")
+    def open_menu(self, d):
+        mv = ModalView(size_hint=(.82, None), height=dp(190),
+                       background="", background_color=(0, 0, 0, .55))
+        panel = Panel(bg="card", orientation="vertical", padding=dp(12),
+                      spacing=dp(8))
 
-    def close_detail(self):
-        self.sm.transition = SlideTransition(direction="right",
-                                             duration=.2)
-        self.goto(self.prev, fade=False)
+        def opt(label, fn):
+            c = Card(bg="bg", size_hint_y=None, height=dp(46),
+                     padding=[dp(14), 0])
+            c.add_widget(Txt(label, 14, fill=True))
 
-    def open_menu(self, it):
-        on = self.is_saved(it)
-        opts = [
-            ("open-in-new", "Open in browser", lambda: open_url(it["link"])),
-            ("share-variant", "Share", lambda: self.share(it)),
-            ("link-variant", "Copy link",
-             lambda: self.copy(it["link"], "Link copied")),
-            ("content-copy", "Copy headline",
-             lambda: self.copy(it["title"], "Headline copied")),
-            ("star" if on else "star-outline",
-             "Remove from Saved" if on else "Save with details",
-             lambda: self.toggle_save(it)),
-            ("magnify", "Search this on Google",
-             lambda: open_url("https://www.google.com/search?q="
-                              + quote(it["title"]))),
-        ]
-        src = it.get("src")
-        if src:
-            opts.append(("eye-off", "Hide news from %s" % src,
-                         lambda: self.hide_source(src)))
-        Sheet(self, it["title"], opts).show()
+            def run(*a):
+                mv.dismiss()
+                fn()
+            c.bind(on_release=run)
+            panel.add_widget(c)
 
-    def copy(self, text, msg):
-        try:
-            from kivy.core.clipboard import Clipboard
-            Clipboard.copy(text)
-            self.toast(msg)
-        except Exception:
-            self.toast("Copy not available")
-
-    def hide_source(self, src):
-        h = self.prof.setdefault("hidden", [])
-        if src not in h:
-            h.append(src)
-        self.save_prof()
-        self.toast("Hidden: " + src)
-        self.render_feeds()
-        if self.cur == "detail":
-            self.close_detail()
-
-    def toggle_save(self, it):
-        if self.is_saved(it):
-            self.saved = [s for s in self.saved if s["link"] != it["link"]]
-            self.toast("Removed from Saved")
-        else:
-            self.saved.insert(
-                0, {k: v for k, v in it.items() if k != "kind"})
-            self.toast("Saved")
-        self.save_json("saved.json", self.saved)
-        self.render_saved()
-        self.sync_detail()
-
-    def share(self, it):
-        try:
-            from jnius import autoclass
-            PA = autoclass("org.kivy.android.PythonActivity")
-            Intent = autoclass("android.content.Intent")
-            String = autoclass("java.lang.String")
-            i = Intent()
-            i.setAction(Intent.ACTION_SEND)
-            i.putExtra(Intent.EXTRA_TEXT,
-                       String("%s\n%s" % (it["title"], it["link"])))
-            i.setType("text/plain")
-            PA.mActivity.startActivity(
-                Intent.createChooser(i, String("Share news")))
-        except Exception:
-            self.toast("Share works on the phone only")
-
-    # ----- renderers -----
-    def home_rows(self, err=False):
-        hr = time.localtime().tm_hour
-        g = ("Good morning" if hr < 12 else
-             "Good afternoon" if hr < 17 else "Good evening")
-        rows = [
-            row({"kind": "greet",
-                 "a": "%s, %s" % (g, self.prof["name"]),
-                 "b": time.strftime("%A, %d %B")}, dp(64)),
-            row({"kind": "hero", "t": self.wx_vals[0],
-                 "c": self.wx_vals[1], "m": self.wx_vals[2]}, dp(112)),
-            row({"kind": "section", "a": "LATEST FROM CHAMOLI"}, dp(30)),
-        ]
-        items = self.visible(fresh(self.cache.get("home", [])))
-        msg = ("No connection. Tap refresh." if err and not items else
-               "No Chamoli news in the last 24 hours.")
-        return rows + news_rows(items, msg)
-
-    def render_home(self, err=False):
-        self.home_rv.data = self.home_rows(err)
-
-    def render_cat(self):
-        self.cat_rv.data = news_rows(self.visible(self.cat_items),
-                                     self.cat_msg)
-
-    def render_live(self):
-        items = self.visible(fresh(self.cache.get("live", [])))
-        rows = [row({"kind": "section", "a": self.live_text}, dp(30))]
-        self.live_rv.data = rows + news_rows(items,
-                                             "No fresh news right now.")
-
-    def render_saved(self):
-        self.saved_rv.data = news_rows(
-            self.saved, "Nothing saved yet. Tap the star on any news.",
-            "star")
-
-    def render_feeds(self):
-        self.render_home()
-        self.render_cat()
-        self.render_live()
-
-    def paint_pills(self):
-        for n, p in self.pills.items():
-            p.set_on(n == self.cat)
-
-    # ----- loading -----
-    def bg(self, fn, cb):
-        def w():
+        def copy():
             try:
-                r = fn()
-            except Exception:
-                r = None
-            Clock.schedule_once(lambda dt: cb(r))
-        threading.Thread(target=w, daemon=True).start()
-
-    def load_home(self, *a):
-        qs = [(CH_Q[lg] + " when:1d", lg) for lg in self.langs()]
-        self.bg(lambda: gather(qs), self.home_done)
-        self.bg(self.get_weather, self.wx_done)
-
-    def home_done(self, r):
-        if r is None:
-            self.render_home(err=True)
-            self.toast("No connection")
-            return
-        self.cache["home"] = r[:25]
-        self.last = time.time()
-        self.save_json("cache.json", self.cache)
-        self.render_home()
-
-    def get_weather(self):
-        url = ("https://api.open-meteo.com/v1/forecast?latitude=%s"
-               "&longitude=%s&current=temperature_2m,weather_code,"
-               "relative_humidity_2m,wind_speed_10m" % WX)
-        w = get(url).json()["current"]
-        return ["%d°" % round(w["temperature_2m"]),
-                wx_text(w["weather_code"]),
-                "Humidity %d%%  ·  Wind %d km/h" % (
-                    round(w["relative_humidity_2m"]),
-                    round(w["wind_speed_10m"]))]
-
-    def wx_done(self, r):
-        if not r:
-            return
-        self.cache["wx"] = r
-        self.wx_vals = tuple(r)
-        self.save_json("cache.json", self.cache)
-        try:
-            d = self.home_rv.data
-            d[1]["d"].update({"t": r[0], "c": r[1], "m": r[2]})
-            self.home_rv.refresh_from_data()
-        except Exception:
-            self.render_home()
-
-    def pick_cat(self, name):
-        self.cat = name
-        self.paint_pills()
-        self.cat_items = []
-        self.cat_msg = "Loading..."
-        self.render_cat()
-        self.load_cat()
-
-    def load_cat(self, *a):
-        qs = [(CAT_Q[lg][self.cat] + " when:1d", lg) for lg in self.langs()]
-        self.bg(lambda: gather(qs), self.cat_done)
-
-    def cat_done(self, r):
-        if r is None:
-            self.cat_items = []
-            self.cat_msg = "No connection. Tap refresh."
-        else:
-            self.cat_items = r
-            self.cat_msg = "No fresh news in this category."
-        self.render_cat()
-
-    def load_live(self, *a):
-        qs = []
-        for lg in self.langs():
-            if lg == "en":
-                qs += [("India news when:1h", lg),
-                       ("Uttarakhand when:6h", lg)]
-            else:
-                qs += [("भारत समाचार when:1h", lg),
-                       ("उत्तराखंड when:6h", lg)]
-            qs.append((CH_Q[lg] + " when:1d", lg))
-        self.bg(lambda: gather(qs), self.live_done)
-
-    def live_done(self, r):
-        if r is None:
-            return
-        links = [x["link"] for x in r[:25]]
-        self.cache["live"] = r[:25]
-        self.live_text = ("UPDATED %s   ·   AUTO REFRESH"
-                          % time.strftime("%H:%M"))
-        self.save_json("cache.json", self.cache)
-        if links == self.live_links:
-            try:
-                d = self.live_rv.data
-                d[0]["d"]["a"] = self.live_text
-                self.live_rv.refresh_from_data()
+                from kivy.core.clipboard import Clipboard
+                Clipboard.copy(d["link"])
             except Exception:
                 pass
-            return
-        self.live_links = links
-        self.render_live()
 
-    # ----- profile photo -----
-    def pick_photo(self):
-        try:
-            from android import activity
-            from jnius import autoclass
-            PA = autoclass("org.kivy.android.PythonActivity")
-            Intent = autoclass("android.content.Intent")
-            i = Intent(Intent.ACTION_GET_CONTENT)
-            i.setType("image/*")
-            activity.bind(on_activity_result=self.on_pick)
-            PA.mActivity.startActivityForResult(
-                Intent.createChooser(i, "Select photo"), 7781)
-        except Exception:
-            self.toast("Photo picker works on the phone only")
+        def sv():
+            self.toggle_save(d)
+            for rv in self.rvs.values():
+                rv.refresh_from_data()
 
-    def on_pick(self, req, res, data):
-        if req != 7781:
-            return
-        try:
-            from android import activity
-            activity.unbind(on_activity_result=self.on_pick)
-        except Exception:
-            pass
-        if res != -1 or data is None:
-            return
-        try:
-            from jnius import autoclass
-            PA = autoclass("org.kivy.android.PythonActivity")
-            uri = data.getData()
-            stream = PA.mActivity.getContentResolver().openInputStream(uri)
-            BF = autoclass("android.graphics.BitmapFactory")
-            Opt = autoclass("android.graphics.BitmapFactory$Options")
-            o = Opt()
-            o.inSampleSize = 4
-            bmp = BF.decodeStream(stream, None, o)
-            stream.close()
-            CF = autoclass("android.graphics.Bitmap$CompressFormat")
-            FOS = autoclass("java.io.FileOutputStream")
-            dst = os.path.join(self.user_data_dir,
-                               "avatar_%d.jpg" % int(time.time()))
-            out = FOS(dst)
-            bmp.compress(CF.JPEG, 90, out)
-            out.flush()
-            out.close()
-            old = self.prof.get("photo")
-            self.prof["photo"] = dst
-            self.save_prof()
-            try:
-                if old and os.path.exists(old):
-                    os.remove(old)
-            except Exception:
-                pass
-            Clock.schedule_once(lambda dt: self.avatar.set_photo(
-                dst, self.prof["name"]))
-        except Exception:
-            Clock.schedule_once(
-                lambda dt: self.toast("Could not load that photo"))
+        opt("Open in browser", lambda: open_url(d["link"]))
+        opt("Remove from saved" if self.is_saved(d) else "Save", sv)
+        opt("Copy link", copy)
+        mv.add_widget(panel)
+        mv.open()
 
 
 def start():
-    SandeshApp().run()
+    NewsApp().run()
+
+
+if __name__ == "__main__":
+    start()
