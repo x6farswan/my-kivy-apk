@@ -6,10 +6,10 @@ source.dir = .
 icon.filename = %(source.dir)s/icon.png
 source.include_exts = py,png,jpg,kv,atlas,ttf
 version = 0.1
-requirements = python3,kivy==2.2.1,kivymd==1.1.1,pillow,requests,urllib3,idna,charset-normalizer,certifi
+requirements = python3,kivy==2.2.1,kivymd==1.1.1,pillow,requests,urllib3,idna,charset-normalizer,certifi,openssl
 orientation = portrait
 fullscreen = 0
-android.permissions = INTERNET
+android.permissions = INTERNET, ACCESS_NETWORK_STATE
 android.api = 33
 android.minapi = 21
 android.ndk = 25b
