@@ -3,6 +3,7 @@ title = Sandesh
 package.name = dailynewsapp
 package.domain = org.sovereign
 source.dir = .
+icon.filename = %(source.dir)s/icon.png
 source.include_exts = py,png,jpg,kv,atlas,ttf
 version = 0.1
 requirements = python3,kivy==2.2.1,kivymd==1.1.1,pillow,requests,urllib3,idna,charset-normalizer,certifi

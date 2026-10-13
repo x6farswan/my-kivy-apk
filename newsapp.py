@@ -1,5 +1,7 @@
+import html
 import json
 import os
+import re
 import threading
 import time
 import webbrowser
@@ -13,20 +15,30 @@ from kivy.animation import Animation
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.image import Image as CoreImage
+from kivy.core.text import Label as CoreLabel
 from kivy.core.text import LabelBase
 from kivy.core.window import Window
-from kivy.graphics import Color, Ellipse, Rectangle, RoundedRectangle
+from kivy.graphics import (Color, Ellipse, PopMatrix, PushMatrix, Rectangle,
+                           RoundedRectangle, Translate)
 from kivy.metrics import dp, sp
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
-from kivy.uix.screenmanager import FadeTransition, Screen, ScreenManager
+from kivy.uix.recycleboxlayout import RecycleBoxLayout
+from kivy.uix.recycleview import RecycleView
+from kivy.uix.recycleview.views import RecycleDataViewBehavior
+from kivy.uix.screenmanager import (FadeTransition, Screen, ScreenManager,
+                                    SlideTransition)
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.textinput import TextInput
+from kivy.uix.widget import Widget
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 MAX_AGE = 24 * 3600
 WX = (30.41, 79.32)
+SITE = "https://x6farswan.github.io"
+INSTA = "https://instagram.com/x6_farswan"
 
 
 def reg(name, fn):
@@ -145,6 +157,22 @@ def fresh(lst):
     return [x for x in lst if now - x["ts"] < MAX_AGE]
 
 
+def parse_related(desc, link, title):
+    out = []
+    if not desc:
+        return out
+    pat = (r'<a href="([^"]+)"[^>]*>(.*?)</a>\s*(?:&nbsp;|\xa0|\s)*'
+           r'<font[^>]*>(.*?)</font>')
+    for href, ttl, src in re.findall(pat, desc, re.S):
+        ttl = html.unescape(re.sub(r"<[^>]+>", "", ttl)).strip()
+        src = html.unescape(re.sub(r"<[^>]+>", "", src)).strip()
+        href = html.unescape(href)
+        if href == link or ttl == title or not ttl:
+            continue
+        out.append({"title": ttl, "src": src, "link": href})
+    return out[:8]
+
+
 def fetch(query, lang):
     url = ("https://news.google.com/rss/search?q=" + quote(query)
            + "&" + LOC[lang])
@@ -160,8 +188,11 @@ def fetch(query, lang):
             src = ""
             if " - " in title:
                 title, src = title.rsplit(" - ", 1)
-            out.append({"title": title, "src": src,
-                        "link": it.findtext("link"), "ts": ts})
+            link = it.findtext("link")
+            out.append({"title": title, "src": src, "link": link,
+                        "ts": ts,
+                        "rel": parse_related(it.findtext("description"),
+                                             link, title)})
         except Exception:
             continue
     return out
@@ -219,6 +250,223 @@ def open_url(url):
             pass
 
 
+# ---------- text textures (used by the fast list rows) ----------
+_TC = {}
+
+
+def tex(text, fs, font="Roboto", bold=False, width=None, lines=0,
+        halign="left"):
+    if not text:
+        return None
+    key = (text, fs, font, bold, width, lines, halign)
+    t = _TC.get(key)
+    if t is None:
+        if len(_TC) > 160:
+            _TC.clear()
+        kw = dict(text=text, font_size=sp(fs), font_name=font, bold=bold,
+                  halign=halign, valign="top")
+        if width:
+            kw["text_size"] = (width, None)
+        if lines:
+            kw["max_lines"] = lines
+        lb = CoreLabel(**kw)
+        lb.refresh()
+        t = lb.texture
+        _TC[key] = t
+    return t
+
+
+def news_h():
+    return dp(150)
+
+
+def row(d, h):
+    return {"d": d, "height": h, "size_hint_y": None}
+
+
+def news_rows(items, empty, icon="newspaper"):
+    if not items:
+        return [row({"kind": "note", "icon": icon, "a": empty}, dp(190))]
+    return [row(dict(it, kind="news"), news_h()) for it in items[:30]]
+
+
+class Row(RecycleDataViewBehavior, Widget):
+    """One list row, drawn directly on the canvas (very light)."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.d = None
+        self._tr = None
+        self._press = False
+        self._cancel = False
+        self._pop = False
+        self.bind(size=self.redraw, pos=self._move)
+
+    def refresh_view_attrs(self, rv, index, data):
+        super().refresh_view_attrs(rv, index, data)
+        self._press = False
+        self.redraw()
+
+    def _move(self, *a):
+        if self._tr is not None:
+            self._tr.xy = self.pos
+
+    def redraw(self, *a):
+        self.canvas.clear()
+        d = self.d
+        if not d or self.width < dp(150):
+            return
+        with self.canvas:
+            PushMatrix()
+            self._tr = Translate(self.x, self.y)
+            getattr(self, "k_" + d["kind"])(d, self.width, self.height)
+            PopMatrix()
+
+    # --- drawing helpers (local coordinates) ---
+    def put(self, t, x, ytop, col):
+        if t is None:
+            return
+        Color(*col)
+        Rectangle(texture=t, pos=(x, ytop - t.height), size=t.size)
+
+    def box(self, w, h, col, r=18, alpha=None):
+        c = P[col]
+        Color(c[0], c[1], c[2], c[3] if alpha is None else alpha)
+        RoundedRectangle(pos=(0, 0), size=(w, h), radius=[dp(r)])
+
+    # --- row kinds ---
+    def k_greet(self, d, w, h):
+        t = tex(d["a"], 22, fnt(d["a"], SERIF), width=w - dp(8))
+        self.put(t, dp(4), h - dp(4), P["text"])
+        self.put(tex(d["b"], 12), dp(4), h - dp(40), P["sub"])
+
+    def k_hero(self, d, w, h):
+        self.box(w, h, "card", 18)
+        t = tex(d["t"], 46, SERIF)
+        if t is not None:
+            self.put(t, dp(20), h / 2 + t.height / 2, P["gold"])
+        x = dp(130)
+        iw = max(dp(60), w - x - dp(80))
+        self.put(tex("Chamoli", 18, bold=True), x, h - dp(18), P["text"])
+        self.put(tex(d["c"], 14, fnt(d["c"]), width=iw, lines=1), x,
+                 h - dp(48), P["gold"])
+        self.put(tex(d["m"], 12, fnt(d["m"]), width=iw, lines=1), x,
+                 h - dp(72), P["sub"])
+        g = tex(ic(WX_ICON.get(d["c"], "weather-partly-cloudy")), 40, "MDI")
+        if g is not None:
+            self.put(g, w - dp(18) - g.width, h / 2 + g.height / 2,
+                     P["gold"])
+
+    def k_section(self, d, w, h):
+        self.put(tex(d["a"], 12, fnt(d["a"]), bold=True), dp(2), h - dp(6),
+                 P["gold"])
+
+    def k_note(self, d, w, h):
+        g = tex(ic(d.get("icon", "newspaper")), 44, "MDI")
+        if g is not None:
+            self.put(g, (w - g.width) / 2, h - dp(26), P["gold"])
+        self.put(tex(d["a"], 14, fnt(d["a"]), width=w - dp(40),
+                     halign="center"), dp(20), h - dp(100), P["sub"])
+
+    def k_news(self, d, w, h):
+        self.box(w, h, "card", 18)
+        if self._press:
+            self.box(w, h, "gold", 18, .12)
+        title = d["title"]
+        t = tex(title, 17, fnt(title, SERIF), width=w - dp(36), lines=3)
+        self.put(t, dp(18), h - dp(16), P["text"])
+        app = App.get_running_app()
+        saved = app.is_saved(d)
+        cy = dp(22)
+        tm = tex(ago(d["ts"]), 12)
+        tw = tm.width if tm is not None else 0
+        smax = max(dp(40), w - dp(18) - dp(100) - tw - dp(10))
+        src = d.get("src") or ""
+        st = tex(src, 12, fnt(src), bold=True)
+        if st is not None and st.width > smax:
+            st = tex(src, 12, fnt(src), bold=True, width=smax, lines=1)
+        x = dp(18)
+        if st is not None:
+            self.put(st, x, cy + st.height / 2, P["gold"])
+            x += (min(st.width, smax)) + dp(10)
+        if tm is not None:
+            self.put(tm, x, cy + tm.height / 2, P["sub"])
+        sz = 27 if self._pop else 22
+        si = tex(ic("star" if saved else "star-outline"), sz, "MDI")
+        if si is not None:
+            self.put(si, w - dp(74) - si.width / 2, cy + si.height / 2,
+                     P["gold"] if saved else P["sub"])
+        di = tex(ic("dots-vertical"), 22, "MDI")
+        if di is not None:
+            self.put(di, w - dp(28) - di.width / 2, cy + di.height / 2,
+                     P["sub"])
+
+    # --- touch ---
+    def on_touch_down(self, touch):
+        if (touch.is_mouse_scrolling or not self.d
+                or self.d.get("kind") != "news"
+                or not self.collide_point(*touch.pos)):
+            return False
+        touch.grab(self)
+        self._press = True
+        self._cancel = False
+        self.redraw()
+        return True
+
+    def on_touch_move(self, touch):
+        if touch.grab_current is self:
+            if not self._cancel and (abs(touch.x - touch.ox) > dp(10)
+                                     or abs(touch.y - touch.oy) > dp(10)):
+                self._cancel = True
+                self._press = False
+                self.redraw()
+            return True
+        return False
+
+    def on_touch_up(self, touch):
+        if touch.grab_current is not self:
+            return False
+        touch.ungrab(self)
+        ok = self._press and not self._cancel
+        self._press = False
+        self.redraw()
+        if ok and self.collide_point(*touch.pos):
+            self.tapped(touch)
+        return True
+
+    def tapped(self, touch):
+        app = App.get_running_app()
+        d = self.d
+        lx = touch.x - self.x
+        ly = touch.y - self.y
+        if ly < dp(46) and lx > self.width - dp(50):
+            app.open_menu(d)
+        elif ly < dp(46) and lx > self.width - dp(100):
+            self._pop = True
+            app.toggle_save(d)
+            self.redraw()
+            Clock.schedule_once(self._unpop, .14)
+        else:
+            app.open_detail(d)
+
+    def _unpop(self, dt):
+        self._pop = False
+        self.redraw()
+
+
+def make_rv():
+    rv = RecycleView(bar_width=0, do_scroll_x=False,
+                     scroll_distance=dp(6), scroll_timeout=40)
+    rv.viewclass = Row
+    lay = RecycleBoxLayout(default_size=(None, news_h()),
+                           default_size_hint=(1, None), size_hint_y=None,
+                           orientation="vertical", spacing=dp(12),
+                           padding=[dp(16), dp(4), dp(16), dp(18)])
+    lay.bind(minimum_height=lay.setter("height"))
+    rv.add_widget(lay)
+    return rv
+
+
 # ---------------- widgets ----------------
 class Txt(Label):
     def __init__(self, text="", fs=14, color="text", bold=False,
@@ -274,10 +522,16 @@ class IconBtn(ButtonBehavior, Label):
         self.text = ic(icon)
         self.color = P[color]
 
-    def pop(self):
-        a = (Animation(font_size=sp(self.base + 7), d=.08)
-             + Animation(font_size=sp(self.base), d=.14))
-        a.start(self)
+
+class Glyph(Label):
+    def __init__(self, icon, fs=22, color="gold", box=34, **kw):
+        super().__init__(text=ic(icon), font_name="MDI", font_size=sp(fs),
+                         color=P[color], size_hint=(None, 1),
+                         width=dp(box), **kw)
+
+
+class LinkLabel(ButtonBehavior, Label):
+    pass
 
 
 class Pill(ButtonBehavior, Label):
@@ -328,10 +582,6 @@ class Field(TextInput):
                          hint_text_color=P["sub"],
                          padding=[dp(16), dp(14)], font_size=sp(16),
                          size_hint_y=None, height=dp(50), **kw)
-
-
-class Avatar(Label):
-    pass
 
 
 class Pic(BoxLayout):
@@ -390,6 +640,86 @@ class Toast(Label):
         self._r.size = self.size
 
 
+class Dim(Widget):
+    def __init__(self, cb, **kw):
+        super().__init__(**kw)
+        self.cb = cb
+        with self.canvas:
+            self.col = Color(0, 0, 0, 0)
+            self.rect = Rectangle(pos=self.pos, size=self.size)
+        self.bind(pos=self._u, size=self._u)
+
+    def _u(self, *a):
+        self.rect.pos = self.pos
+        self.rect.size = self.size
+
+    def on_touch_down(self, touch):
+        self.cb()
+        return True
+
+    def on_touch_move(self, touch):
+        return True
+
+    def on_touch_up(self, touch):
+        return True
+
+
+class Sheet(FloatLayout):
+    """iOS style bottom action sheet."""
+
+    def __init__(self, app, title, opts, **kw):
+        super().__init__(**kw)
+        self.app = app
+        self.closing = False
+        self.dim = Dim(self.dismiss)
+        self.add_widget(self.dim)
+        n = len(opts)
+        ph = dp(34) + dp(56) + n * dp(54)
+        self.panel = Panel(orientation="vertical", size_hint=(1, None),
+                           height=ph, bg="card", radius=24,
+                           padding=[dp(10), dp(16), dp(10), dp(18)],
+                           spacing=dp(2))
+        self.panel.add_widget(Txt(title, fs=13, color="sub",
+                                  max_lines=2, size_hint_y=None))
+        for icon, label, cb in opts:
+            r = Card(orientation="horizontal", size_hint_y=None,
+                     height=dp(52), padding=[dp(12), 0, dp(12), 0],
+                     spacing=dp(14), radius=14)
+            r.add_widget(Glyph(icon))
+            r.add_widget(Txt(label, fs=15, fill=True))
+            r.bind(on_release=lambda x, f=cb: self.pick(f))
+            self.panel.add_widget(r)
+        self.add_widget(self.panel)
+
+    def show(self):
+        self.app.sheet = self
+        Window.add_widget(self)
+        self.panel.y = -self.panel.height
+        Animation(y=0, d=.26, t="out_cubic").start(self.panel)
+        Animation(a=.6, d=.26).start(self.dim.col)
+
+    def pick(self, cb):
+        self.dismiss()
+        Clock.schedule_once(lambda dt: cb(), .06)
+
+    def dismiss(self):
+        if self.closing:
+            return
+        self.closing = True
+        a = Animation(y=-self.panel.height, d=.2, t="in_cubic")
+        a.bind(on_complete=lambda *x: self._gone())
+        a.start(self.panel)
+        Animation(a=0, d=.2).start(self.dim.col)
+
+    def _gone(self):
+        try:
+            Window.remove_widget(self)
+        except Exception:
+            pass
+        if self.app.sheet is self:
+            self.app.sheet = None
+
+
 # ---------------- app ----------------
 class SandeshApp(App):
     def build(self):
@@ -402,6 +732,7 @@ class SandeshApp(App):
         self.prof.setdefault("dark", True)
         self.prof.setdefault("lang", "both")
         self.prof.setdefault("photo", "")
+        self.prof.setdefault("hidden", [])
         self.saved = self.load_json("saved.json", [])
         self.cache = self.load_json("cache.json", {})
         if not isinstance(self.cache, dict):
@@ -409,9 +740,16 @@ class SandeshApp(App):
         self.wx_vals = tuple(self.cache.get("wx", ["--°", "Loading", ""]))
         self.cat = CATS[0]
         self.cat_items = []
+        self.cat_msg = "Pick a category above."
         self.cat_loaded = False
+        self.live_text = "UPDATED --:--   ·   AUTO REFRESH"
+        self.live_links = []
         self.last = 0
         self.cur = "home"
+        self.prev = "home"
+        self.cur_item = None
+        self.sheet = None
+        self.live_dot = None
         self.apply_palette()
         Window.bind(on_keyboard=self.on_key)
         return self.make_root()
@@ -419,7 +757,7 @@ class SandeshApp(App):
     def on_start(self):
         self.load_home()
         self.load_live()
-        Clock.schedule_interval(lambda dt: self.load_live(), 90)
+        Clock.schedule_interval(lambda dt: self.load_live(), 120)
 
     def on_pause(self):
         return True
@@ -430,7 +768,15 @@ class SandeshApp(App):
             self.load_live()
 
     def on_key(self, win, key, *a):
-        if key == 27 and self.cur != "home":
+        if key != 27:
+            return False
+        if self.sheet is not None:
+            self.sheet.dismiss()
+            return True
+        if self.cur == "detail":
+            self.close_detail()
+            return True
+        if self.cur != "home":
             self.goto("home")
             return True
         return False
@@ -465,6 +811,10 @@ class SandeshApp(App):
         self.prof["dark"] = not self.prof.get("dark", True)
         self.save_prof()
         self.apply_palette()
+        if self.sheet is not None:
+            self.sheet.dismiss()
+        if self.cur == "detail":
+            self.cur = self.prev
         Window.remove_widget(self.root)
         self.root = self.make_root()
         Window.add_widget(self.root)
@@ -485,7 +835,7 @@ class SandeshApp(App):
         self.sm = ScreenManager(transition=FadeTransition(duration=.16))
         for s in (self.build_home(), self.build_explore(),
                   self.build_live(), self.build_saved(),
-                  self.build_profile()):
+                  self.build_profile(), self.build_detail()):
             self.sm.add_widget(s)
         root.add_widget(self.sm)
         root.add_widget(self.make_nav())
@@ -520,14 +870,28 @@ class SandeshApp(App):
             bar.add_widget(it)
         return bar
 
-    def goto(self, key):
+    def goto(self, key, fade=True):
         self.cur = key
         for k, it in self.nav.items():
             it.active(k == key)
+        if fade:
+            self.sm.transition = FadeTransition(duration=.16)
         self.sm.current = key
+        self.pulse(key == "live")
         if key == "explore" and not self.cat_loaded:
             self.cat_loaded = True
             self.load_cat()
+
+    def pulse(self, on):
+        d = self.live_dot
+        if d is None:
+            return
+        Animation.cancel_all(d)
+        d.opacity = 1
+        if on:
+            a = Animation(opacity=.25, d=.9) + Animation(opacity=1, d=.9)
+            a.repeat = True
+            a.start(d)
 
     def header(self, title, actions=(), live=False):
         h = BoxLayout(size_hint_y=None, height=dp(64),
@@ -537,9 +901,7 @@ class SandeshApp(App):
                         font_size=sp(12), color=(.92, .25, .25, 1),
                         size_hint=(None, None), size=(dp(22), dp(22)),
                         pos_hint={"center_y": .5})
-            a = Animation(opacity=.25, d=.9) + Animation(opacity=1, d=.9)
-            a.repeat = True
-            a.start(dot)
+            self.live_dot = dot
             h.add_widget(dot)
         h.add_widget(Txt(title, fs=26, color="gold", serif=True,
                          wrap=False, fill=True))
@@ -552,7 +914,7 @@ class SandeshApp(App):
 
     def scroll(self):
         sv = ScrollView(bar_width=0, do_scroll_x=False,
-                        scroll_distance=dp(6), scroll_timeout=50)
+                        scroll_distance=dp(6), scroll_timeout=40)
         box = BoxLayout(orientation="vertical", size_hint_y=None,
                         spacing=dp(12),
                         padding=[dp(16), dp(4), dp(16), dp(18)])
@@ -566,6 +928,10 @@ class SandeshApp(App):
         return {"en": ["en"], "hi": ["hi"]}.get(
             self.prof.get("lang", "both"), ["en", "hi"])
 
+    def visible(self, items):
+        hid = set(self.prof.get("hidden", []))
+        return [x for x in items if x.get("src") not in hid]
+
     # ----- screens -----
     def build_home(self):
         s = Screen(name="home")
@@ -573,8 +939,8 @@ class SandeshApp(App):
         col.add_widget(self.header("Sandesh", [
             ("refresh", self.load_home),
             ("theme-light-dark", self.toggle_theme)]))
-        sv, self.home_box = self.scroll()
-        col.add_widget(sv)
+        self.home_rv = make_rv()
+        col.add_widget(self.home_rv)
         s.add_widget(col)
         return s
 
@@ -586,19 +952,19 @@ class SandeshApp(App):
             ("theme-light-dark", self.toggle_theme)]))
         psv = ScrollView(size_hint_y=None, height=dp(52), bar_width=0,
                          do_scroll_y=False)
-        row = BoxLayout(size_hint_x=None, spacing=dp(8),
-                        padding=[dp(16), dp(6)])
-        row.bind(minimum_width=row.setter("width"))
+        prow = BoxLayout(size_hint_x=None, spacing=dp(8),
+                         padding=[dp(16), dp(6)])
+        prow.bind(minimum_width=prow.setter("width"))
         self.pills = {}
         for n in CATS:
             p = Pill(n)
             p.bind(on_release=lambda x, nm=n: self.pick_cat(nm))
             self.pills[n] = p
-            row.add_widget(p)
-        psv.add_widget(row)
+            prow.add_widget(p)
+        psv.add_widget(prow)
         col.add_widget(psv)
-        sv, self.cat_box = self.scroll()
-        col.add_widget(sv)
+        self.cat_rv = make_rv()
+        col.add_widget(self.cat_rv)
         s.add_widget(col)
         return s
 
@@ -608,9 +974,8 @@ class SandeshApp(App):
         col.add_widget(self.header("Live", [
             ("refresh", self.load_live),
             ("theme-light-dark", self.toggle_theme)], live=True))
-        sv, self.live_box = self.scroll()
-        self.live_info = Txt("Fetching latest...", fs=12, color="sub")
-        col.add_widget(sv)
+        self.live_rv = make_rv()
+        col.add_widget(self.live_rv)
         s.add_widget(col)
         return s
 
@@ -619,9 +984,17 @@ class SandeshApp(App):
         col = BoxLayout(orientation="vertical")
         col.add_widget(self.header("Saved", [
             ("theme-light-dark", self.toggle_theme)]))
-        sv, self.saved_box = self.scroll()
-        col.add_widget(sv)
+        self.saved_rv = make_rv()
+        col.add_widget(self.saved_rv)
         s.add_widget(col)
+        return s
+
+    def build_detail(self):
+        s = Screen(name="detail")
+        self.detail_col = BoxLayout(orientation="vertical")
+        s.add_widget(self.detail_col)
+        self.d_star = None
+        self.d_status = None
         return s
 
     def build_profile(self):
@@ -645,35 +1018,41 @@ class SandeshApp(App):
         self.name_in = Field(text=name, hint_text="Your name")
         box.add_widget(self.name_in)
         box.add_widget(self.gold_btn("Save name", self.save_name))
-        box.add_widget(self.section("Preferences"))
-        box.add_widget(self.row(
+        box.add_widget(Txt("PREFERENCES", fs=12, color="gold", bold=True))
+        box.add_widget(self.row_btn(
             "Appearance", "Dark" if self.prof["dark"] else "Light",
             lambda v: self.toggle_theme()))
-        box.add_widget(self.row("Language", self.lang_label(),
-                                self.cycle_lang))
-        box.add_widget(self.row("Version", "Sandesh 3.0", lambda v: None))
+        box.add_widget(self.row_btn("Language", self.lang_label(),
+                                    self.cycle_lang))
+        box.add_widget(self.row_btn(
+            "Hidden sources", str(len(self.prof.get("hidden", []))),
+            self.clear_hidden))
+        box.add_widget(self.row_btn("Version", "Sandesh 4.0",
+                                    lambda v: None))
         col.add_widget(sv)
         cred = BoxLayout(orientation="vertical", size_hint_y=None,
-                         height=dp(70), padding=[0, dp(4)])
+                         height=dp(96), padding=[0, dp(4)])
         cred.add_widget(Txt(
             "Made in Gopeshwar with [color=ff4d6d][font=MDI]%s[/font]"
             "[/color]" % ic("heart"), fs=12, color="sub",
             halign="center", markup=True))
-        link = ButtonBehaviorLabel(
+        l1 = LinkLabel(
             text="by Rohit  ·  [color=%s]@x6_farswan[/color]" % hexc("gold"),
             markup=True, font_size=sp(12), color=P["sub"],
             size_hint_y=None, height=dp(28))
-        link.bind(on_release=lambda x: open_url(
-            "https://instagram.com/x6_farswan"))
-        cred.add_widget(link)
+        l1.bind(on_release=lambda x: open_url(INSTA))
+        cred.add_widget(l1)
+        l2 = LinkLabel(
+            text="[color=%s]x6farswan.github.io[/color]" % hexc("gold"),
+            markup=True, font_size=sp(12), color=P["sub"],
+            size_hint_y=None, height=dp(28))
+        l2.bind(on_release=lambda x: open_url(SITE))
+        cred.add_widget(l2)
         col.add_widget(cred)
         s.add_widget(col)
         return s
 
     # ----- small builders -----
-    def section(self, t):
-        return Txt(t.upper(), fs=12, color="gold", bold=True)
-
     def gold_btn(self, text, cb):
         b = Card(bg="gold", size_hint_y=None, height=dp(48), radius=24)
         b.add_widget(Txt(text, fs=15, color="onGold", bold=True,
@@ -681,7 +1060,7 @@ class SandeshApp(App):
         b.bind(on_release=lambda x: cb())
         return b
 
-    def row(self, title, value, cb):
+    def row_btn(self, title, value, cb):
         r = Card(orientation="horizontal", size_hint_y=None,
                  height=dp(54), padding=[dp(18), 0, dp(18), 0], radius=14)
         r.add_widget(Txt(title, fs=15, fill=True))
@@ -689,15 +1068,6 @@ class SandeshApp(App):
         r.add_widget(v)
         r.bind(on_release=lambda x: cb(v))
         return r
-
-    def note(self, msg, icon="newspaper"):
-        b = BoxLayout(orientation="vertical", size_hint_y=None,
-                      height=dp(190), spacing=dp(10),
-                      padding=[dp(20), dp(30), dp(20), 0])
-        b.add_widget(IconBtn(icon, fs=44, color="gold", box=64,
-                             pos_hint={"center_x": .5}))
-        b.add_widget(Txt(msg, fs=14, color="sub", halign="center"))
-        return b
 
     def lang_label(self):
         if not HINDI:
@@ -719,6 +1089,13 @@ class SandeshApp(App):
         if self.cur == "explore":
             self.goto("explore")
 
+    def clear_hidden(self, v):
+        self.prof["hidden"] = []
+        self.save_prof()
+        v.text = "0"
+        self.render_feeds()
+        self.toast("Showing all sources")
+
     def save_name(self):
         n = self.name_in.text.strip() or "user1"
         self.prof["name"] = n
@@ -729,59 +1106,141 @@ class SandeshApp(App):
         self.render_home()
         self.toast("Saved")
 
-    # ----- news cards -----
+    # ----- story page -----
     def is_saved(self, it):
         return any(s["link"] == it["link"] for s in self.saved)
 
-    def news_card(self, it, idx=0):
+    def open_detail(self, it):
+        self.cur_item = it
+        self.pulse(False)
+        if self.cur != "detail":
+            self.prev = self.cur
+        self.cur = "detail"
+        col = self.detail_col
+        col.clear_widgets()
         on = self.is_saved(it)
-        c = Card(orientation="vertical", size_hint_y=None,
-                 padding=[dp(18), dp(16), dp(10), dp(6)], spacing=dp(4))
-        c.bind(minimum_height=c.setter("height"))
-        c.add_widget(Txt(it["title"], fs=17, serif=True))
-        row = BoxLayout(size_hint_y=None, height=dp(40))
-        row.add_widget(Txt(it["src"], fs=12, color="gold", bold=True,
-                           fill=True, shorten=True))
-        row.add_widget(Txt(ago(it["ts"]), fs=12, color="sub", fill=True,
-                           halign="right", size_hint_x=None,
-                           width=dp(76)))
-        sh = IconBtn("share-variant", fs=20, pos_hint={"center_y": .5})
-        sh.bind(on_release=lambda b, i=it: self.share(i))
-        star = IconBtn("star" if on else "star-outline", fs=22,
-                       color="gold" if on else "sub",
+        h = BoxLayout(size_hint_y=None, height=dp(64),
+                      padding=[dp(8), 0, dp(8), 0])
+        back = IconBtn("arrow-left", fs=24, color="text", box=48,
                        pos_hint={"center_y": .5})
-        star.bind(on_release=lambda b, i=it: self.toggle_save(i, b))
-        row.add_widget(sh)
-        row.add_widget(star)
-        c.add_widget(row)
-        c.bind(on_release=lambda x, u=it["link"]: open_url(u))
-        if idx < 8:
-            c.opacity = 0
-            Clock.schedule_once(
-                lambda dt, w=c: Animation(opacity=1, d=.3).start(w),
-                idx * .05)
-        return c
+        back.bind(on_release=lambda x: self.close_detail())
+        h.add_widget(back)
+        h.add_widget(Txt("Story", fs=22, color="gold", serif=True,
+                         wrap=False, fill=True))
+        self.d_star = IconBtn("star" if on else "star-outline", fs=24,
+                              color="gold" if on else "text", box=48,
+                              pos_hint={"center_y": .5})
+        self.d_star.bind(on_release=lambda x: self.toggle_save(
+            self.cur_item))
+        h.add_widget(self.d_star)
+        dots = IconBtn("dots-vertical", fs=24, color="text", box=48,
+                       pos_hint={"center_y": .5})
+        dots.bind(on_release=lambda x: self.open_menu(self.cur_item))
+        h.add_widget(dots)
+        col.add_widget(h)
+        sv, box = self.scroll()
+        box.spacing = dp(14)
+        box.add_widget(Txt((it.get("src") or "News").upper(), fs=12,
+                           color="gold", bold=True))
+        box.add_widget(Txt(it["title"], fs=24, serif=True))
+        when = time.strftime("%d %b %Y, %H:%M", time.localtime(it["ts"]))
+        box.add_widget(Txt("%s   ·   %s" % (ago(it["ts"]), when), fs=12,
+                           color="sub"))
+        self.d_status = Txt("", fs=12, color="sub")
+        box.add_widget(self.d_status)
+        self.sync_detail()
+        box.add_widget(self.gold_btn(
+            "Open in browser", lambda: open_url(self.cur_item["link"])))
+        rel = it.get("rel") or []
+        if rel:
+            box.add_widget(Txt("ALSO REPORTED BY  (%d)" % len(rel), fs=12,
+                               color="gold", bold=True))
+            for r in rel:
+                c = Card(orientation="vertical", size_hint_y=None,
+                         padding=[dp(16), dp(12), dp(16), dp(12)],
+                         spacing=dp(4), radius=14)
+                c.bind(minimum_height=c.setter("height"))
+                c.add_widget(Txt(r["title"], fs=15, serif=True))
+                c.add_widget(Txt(r["src"], fs=12, color="gold", bold=True))
+                c.bind(on_release=lambda x, u=r["link"]: open_url(u))
+                box.add_widget(c)
+        else:
+            box.add_widget(Txt(
+                "No other sources are grouped with this story right now.",
+                fs=13, color="sub"))
+        col.add_widget(sv)
+        self.sm.transition = SlideTransition(direction="left", duration=.2)
+        self.sm.current = "detail"
 
-    def cards_into(self, box, items, empty):
-        if not items:
-            box.add_widget(self.note(empty))
+    def sync_detail(self):
+        if self.cur != "detail" or self.cur_item is None:
             return
-        for i, it in enumerate(items[:25]):
-            box.add_widget(self.news_card(it, i))
+        on = self.is_saved(self.cur_item)
+        if self.d_star is not None:
+            self.d_star.set("star" if on else "star-outline",
+                            "gold" if on else "text")
+        if self.d_status is not None:
+            self.d_status.text = (
+                "Saved on this phone with full details" if on else
+                "Temporary: details clear when the feed refreshes. "
+                "Tap the star to keep it.")
 
-    def toggle_save(self, it, btn):
+    def close_detail(self):
+        self.sm.transition = SlideTransition(direction="right",
+                                             duration=.2)
+        self.goto(self.prev, fade=False)
+
+    def open_menu(self, it):
+        on = self.is_saved(it)
+        opts = [
+            ("open-in-new", "Open in browser", lambda: open_url(it["link"])),
+            ("share-variant", "Share", lambda: self.share(it)),
+            ("link-variant", "Copy link",
+             lambda: self.copy(it["link"], "Link copied")),
+            ("content-copy", "Copy headline",
+             lambda: self.copy(it["title"], "Headline copied")),
+            ("star" if on else "star-outline",
+             "Remove from Saved" if on else "Save with details",
+             lambda: self.toggle_save(it)),
+            ("magnify", "Search this on Google",
+             lambda: open_url("https://www.google.com/search?q="
+                              + quote(it["title"]))),
+        ]
+        src = it.get("src")
+        if src:
+            opts.append(("eye-off", "Hide news from %s" % src,
+                         lambda: self.hide_source(src)))
+        Sheet(self, it["title"], opts).show()
+
+    def copy(self, text, msg):
+        try:
+            from kivy.core.clipboard import Clipboard
+            Clipboard.copy(text)
+            self.toast(msg)
+        except Exception:
+            self.toast("Copy not available")
+
+    def hide_source(self, src):
+        h = self.prof.setdefault("hidden", [])
+        if src not in h:
+            h.append(src)
+        self.save_prof()
+        self.toast("Hidden: " + src)
+        self.render_feeds()
+        if self.cur == "detail":
+            self.close_detail()
+
+    def toggle_save(self, it):
         if self.is_saved(it):
             self.saved = [s for s in self.saved if s["link"] != it["link"]]
-            on = False
             self.toast("Removed from Saved")
         else:
-            self.saved.insert(0, dict(it))
-            on = True
+            self.saved.insert(
+                0, {k: v for k, v in it.items() if k != "kind"})
             self.toast("Saved")
-        btn.set("star" if on else "star-outline", "gold" if on else "sub")
-        btn.pop()
         self.save_json("saved.json", self.saved)
         self.render_saved()
+        self.sync_detail()
 
     def share(self, it):
         try:
@@ -800,64 +1259,45 @@ class SandeshApp(App):
             self.toast("Share works on the phone only")
 
     # ----- renderers -----
-    def hero(self):
-        c = Panel(orientation="horizontal", size_hint_y=None,
-                  height=dp(112), padding=[dp(20), dp(12), dp(12), dp(12)],
-                  spacing=dp(8))
-        self.wx_temp = Txt(self.wx_vals[0], fs=46, color="gold",
-                           serif=True, wrap=False, fill=True,
-                           size_hint_x=None, width=dp(112))
-        c.add_widget(self.wx_temp)
-        info = BoxLayout(orientation="vertical")
-        info.add_widget(Txt("Chamoli", fs=18, bold=True, fill=True))
-        self.wx_cond = Txt(self.wx_vals[1], fs=14, color="gold", fill=True)
-        info.add_widget(self.wx_cond)
-        self.wx_more = Txt(self.wx_vals[2], fs=12, color="sub", fill=True)
-        info.add_widget(self.wx_more)
-        c.add_widget(info)
-        self.wx_icon = IconBtn(WX_ICON.get(self.wx_vals[1],
-                                           "weather-partly-cloudy"),
-                               fs=40, color="gold", box=56,
-                               pos_hint={"center_y": .5})
-        c.add_widget(self.wx_icon)
-        return c
-
-    def render_home(self, err=False):
-        b = self.home_box
-        b.clear_widgets()
-        h = time.localtime().tm_hour
-        g = ("Good morning" if h < 12 else
-             "Good afternoon" if h < 17 else "Good evening")
-        b.add_widget(Txt("%s, %s" % (g, self.prof["name"]), fs=22,
-                         serif=True))
-        b.add_widget(Txt(time.strftime("%A, %d %B"), fs=12, color="sub"))
-        b.add_widget(self.hero())
-        b.add_widget(self.section("Latest from Chamoli"))
-        items = fresh(self.cache.get("home", []))
+    def home_rows(self, err=False):
+        hr = time.localtime().tm_hour
+        g = ("Good morning" if hr < 12 else
+             "Good afternoon" if hr < 17 else "Good evening")
+        rows = [
+            row({"kind": "greet",
+                 "a": "%s, %s" % (g, self.prof["name"]),
+                 "b": time.strftime("%A, %d %B")}, dp(64)),
+            row({"kind": "hero", "t": self.wx_vals[0],
+                 "c": self.wx_vals[1], "m": self.wx_vals[2]}, dp(112)),
+            row({"kind": "section", "a": "LATEST FROM CHAMOLI"}, dp(30)),
+        ]
+        items = self.visible(fresh(self.cache.get("home", [])))
         msg = ("No connection. Tap refresh." if err and not items else
                "No Chamoli news in the last 24 hours.")
-        self.cards_into(b, items, msg)
+        return rows + news_rows(items, msg)
 
-    def render_cat(self, msg="Pick a category above."):
-        self.cat_box.clear_widgets()
-        self.cards_into(self.cat_box, self.cat_items, msg)
+    def render_home(self, err=False):
+        self.home_rv.data = self.home_rows(err)
+
+    def render_cat(self):
+        self.cat_rv.data = news_rows(self.visible(self.cat_items),
+                                     self.cat_msg)
 
     def render_live(self):
-        b = self.live_box
-        b.clear_widgets()
-        b.add_widget(self.live_info)
-        self.cards_into(b, fresh(self.cache.get("live", [])),
-                        "No fresh news right now.")
+        items = self.visible(fresh(self.cache.get("live", [])))
+        rows = [row({"kind": "section", "a": self.live_text}, dp(30))]
+        self.live_rv.data = rows + news_rows(items,
+                                             "No fresh news right now.")
 
     def render_saved(self):
-        b = self.saved_box
-        b.clear_widgets()
-        if not self.saved:
-            b.add_widget(self.note(
-                "Nothing saved yet. Tap the star on any news.", "star"))
-            return
-        for i, it in enumerate(self.saved[:50]):
-            b.add_widget(self.news_card(it, i))
+        self.saved_rv.data = news_rows(
+            self.saved, "Nothing saved yet. Tap the star on any news.",
+            "star")
+
+    def render_feeds(self):
+        self.render_home()
+        self.render_cat()
+        self.render_live()
 
     def paint_pills(self):
         for n, p in self.pills.items():
@@ -904,21 +1344,20 @@ class SandeshApp(App):
             return
         self.cache["wx"] = r
         self.wx_vals = tuple(r)
-        try:
-            self.wx_temp.text = r[0]
-            self.wx_cond.text = r[1]
-            self.wx_more.text = r[2]
-            self.wx_icon.set(WX_ICON.get(r[1], "weather-partly-cloudy"),
-                             "gold")
-        except Exception:
-            pass
         self.save_json("cache.json", self.cache)
+        try:
+            d = self.home_rv.data
+            d[1]["d"].update({"t": r[0], "c": r[1], "m": r[2]})
+            self.home_rv.refresh_from_data()
+        except Exception:
+            self.render_home()
 
     def pick_cat(self, name):
         self.cat = name
         self.paint_pills()
-        self.cat_box.clear_widgets()
-        self.cat_box.add_widget(self.note("Loading..."))
+        self.cat_items = []
+        self.cat_msg = "Loading..."
+        self.render_cat()
         self.load_cat()
 
     def load_cat(self, *a):
@@ -928,10 +1367,11 @@ class SandeshApp(App):
     def cat_done(self, r):
         if r is None:
             self.cat_items = []
-            self.render_cat("No connection. Tap refresh.")
-            return
-        self.cat_items = r
-        self.render_cat("No fresh news in this category.")
+            self.cat_msg = "No connection. Tap refresh."
+        else:
+            self.cat_items = r
+            self.cat_msg = "No fresh news in this category."
+        self.render_cat()
 
     def load_live(self, *a):
         qs = []
@@ -947,11 +1387,21 @@ class SandeshApp(App):
 
     def live_done(self, r):
         if r is None:
-            self.live_info.text = "No connection."
             return
+        links = [x["link"] for x in r[:25]]
         self.cache["live"] = r[:25]
-        self.live_info.text = "Updated " + time.strftime("%H:%M")
+        self.live_text = ("UPDATED %s   ·   AUTO REFRESH"
+                          % time.strftime("%H:%M"))
         self.save_json("cache.json", self.cache)
+        if links == self.live_links:
+            try:
+                d = self.live_rv.data
+                d[0]["d"]["a"] = self.live_text
+                self.live_rv.refresh_from_data()
+            except Exception:
+                pass
+            return
+        self.live_links = links
         self.render_live()
 
     # ----- profile photo -----
@@ -1011,10 +1461,6 @@ class SandeshApp(App):
         except Exception:
             Clock.schedule_once(
                 lambda dt: self.toast("Could not load that photo"))
-
-
-class ButtonBehaviorLabel(ButtonBehavior, Label):
-    pass
 
 
 def start():
